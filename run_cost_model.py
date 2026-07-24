@@ -9,6 +9,7 @@ claim, which the hard rules alone would miss.
 """
 from deltalake import DeltaTable
 
+import config.storage as stg
 from config.spark_config import load_config
 from batch.mine_baselines import mine_procedure_cost_pctiles
 from evidence.rules_baseline import build_indexes
@@ -17,7 +18,12 @@ from evidence.cost_model import score_claim
 
 def main():
     cfg = load_config()
-    rows = DeltaTable(cfg["paths"]["corpus"]).to_pyarrow_table().to_pylist()
+    so = stg.deltalake_storage_options() or None
+    corpus_path = cfg["paths"]["corpus"] if stg.backend() == "local" \
+        else stg.table_path("corpus")
+
+    rows = DeltaTable(corpus_path,
+                      storage_options=so).to_pyarrow_table().to_pylist()
     print(f"1) corpus: {len(rows)} lines, {len({r['claim_id'] for r in rows})} claims")
 
     pctiles = mine_procedure_cost_pctiles(rows)

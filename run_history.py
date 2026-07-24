@@ -1,12 +1,12 @@
 """Patient-history step, with the same honest test as the other components:
 can it catch fraud that per-claim checks structurally cannot see?
 """
-import shutil
 from pathlib import Path
 
 import pyarrow as pa
 from deltalake import write_deltalake, DeltaTable
 
+import config.storage as stg
 from config.spark_config import load_config
 from batch.patient_history import build_patient_history, summarise
 from batch.mine_baselines import mine_all
@@ -18,27 +18,31 @@ MAPPING = str(Path(__file__).parent / "data_quality" / "mappings" / "source_hosp
 
 
 def write_delta(path: str, rows: list[dict]):
-    shutil.rmtree(path, ignore_errors=True)
+    """No rmtree — Delta's own overwrite works on any backend."""
     if not rows:
         return
     t = pa.Table.from_pylist(rows)
     for i, f in enumerate(t.schema):
         if pa.types.is_null(f.type):
             t = t.set_column(i, f.name, t.column(i).cast(pa.string()))
-    write_deltalake(path, t, mode="overwrite")
+    write_deltalake(path, t, mode="overwrite",
+                    storage_options=stg.deltalake_storage_options() or None)
 
 
 def main():
     cfg = load_config()
-    ref = cfg["paths"]["reference"]
+    so = stg.deltalake_storage_options() or None
+    corpus_path = cfg["paths"]["corpus"] if stg.backend() == "local" \
+        else stg.table_path("corpus")
 
     print("1) loading corpus ...")
-    rows = DeltaTable(cfg["paths"]["corpus"]).to_pyarrow_table().to_pylist()
+    rows = DeltaTable(corpus_path,
+                      storage_options=so).to_pyarrow_table().to_pylist()
     print(f"   {len(rows)} lines, {len({r['patient_hash'] for r in rows})} patients")
 
     print("2) building patient history ...")
     hist = build_patient_history(rows)
-    write_delta(f"{ref}/patient_history", hist)
+    write_delta(stg.table_path("patient_history"), hist)
     s = summarise(hist)
     print(f"   {s['total']} (patient, claim) rows | flagged {s['flagged']} "
           f"({s['flagged']/max(s['total'],1)*100:.1f}%)")

@@ -14,7 +14,7 @@ paths:
 #   azurite Azure Storage API, Docker, offline  (proves the Azure path for free)
 #   adls    real Azure Data Lake Gen2           (cloud version; needs env credentials)
 storage:
-  backend: local            # local | azurite | adls
+  backend: azurite            # local | azurite | adls
   container: mediguard
 
 spark:

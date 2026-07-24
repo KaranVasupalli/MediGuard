@@ -8,13 +8,16 @@
 
 Labels live in their own table. They are NEVER part of the 27-column claim schema and
 never become a feature — in reality they come from audit outcomes, not from the bill.
+
+Paths come from config.storage, so the same script writes to local folders, Azurite,
+or real ADLS Gen2 depending only on storage.backend in config.yaml.
 """
-import shutil
 from pathlib import Path
 
 import pyarrow as pa
 from deltalake import write_deltalake, DeltaTable
 
+import config.storage as stg
 from config.spark_config import load_config
 from eval.generate_realistic import generate
 from data_quality.ingestion_gate import run_gate
@@ -26,19 +29,24 @@ MAPPING = str(Path(__file__).parent / "data_quality" / "mappings" / "source_hosp
 
 
 def write_delta(path: str, rows: list[dict], partition_by=None):
-    shutil.rmtree(path, ignore_errors=True)
+    """Overwrite a Delta table. No rmtree — Delta's own overwrite works on any
+    backend and keeps version history, which a folder delete does not."""
     if not rows:
         return
     t = pa.Table.from_pylist(rows)
     for i, f in enumerate(t.schema):
         if pa.types.is_null(f.type):
             t = t.set_column(i, f.name, t.column(i).cast(pa.string()))
-    write_deltalake(path, t, mode="overwrite", partition_by=partition_by)
+    write_deltalake(path, t, mode="overwrite",
+                    partition_by=partition_by,
+                    storage_options=stg.deltalake_storage_options() or None)
 
 
 def main(n_claims: int = 2000):
     cfg = load_config()
-    corpus_path, ref = cfg["paths"]["corpus"], cfg["paths"]["reference"]
+    corpus_path = cfg["paths"]["corpus"] if stg.backend() == "local" \
+        else stg.table_path("corpus")
+    print(f"   storage backend: {stg.describe()}")
 
     print(f"1) generating {n_claims} realistic claims ...")
     raw, labels, truth = generate(n_claims=n_claims)
@@ -49,8 +57,8 @@ def main(n_claims: int = 2000):
     res = run_gate(raw, MAPPING)
     print(f"   clean:{res['report']['clean_out']}  quarantined:{res['report']['quarantined']}")
     write_delta(corpus_path, res["clean"], partition_by=["claim_year", "claim_month"])
-    write_delta(f"{ref}/claim_labels", labels)
-    write_delta(f"{ref}/ring_truth",
+    write_delta(stg.table_path("claim_labels"), labels)
+    write_delta(stg.table_path("ring_truth"),
                 [{"provider_id": p, "in_ring": 1} for p in truth["ring_providers"]] +
                 [{"provider_id": p, "in_ring": 0} for p in truth["honest_providers"]])
     print(f"   injected ring providers: {truth['ring_providers']}")
@@ -58,8 +66,8 @@ def main(n_claims: int = 2000):
     print("3) mining baselines ...")
     rows = res["clean"]
     b = mine_all(rows)
-    write_delta(f"{ref}/diag_procedure_norms", b["diag_procedure_norms"])
-    write_delta(f"{ref}/procedure_cost_pctiles", b["procedure_cost_pctiles"])
+    write_delta(stg.table_path("diag_procedure_norms"), b["diag_procedure_norms"])
+    write_delta(stg.table_path("procedure_cost_pctiles"), b["procedure_cost_pctiles"])
     idx = build_indexes(b["diag_procedure_norms"], b["procedure_cost_pctiles"])
     cost_idx = {(r["hbp_code"], r["provider_state"]): r for r in b["procedure_cost_pctiles"]}
     print(f"   {len(b['diag_procedure_norms'])} norms, "
@@ -67,7 +75,7 @@ def main(n_claims: int = 2000):
 
     print("4) building features ...")
     feats = build_all_features(rows, idx, cost_idx)
-    write_delta(f"{ref}/claim_features", feats)
+    write_delta(stg.table_path("claim_features"), feats)
 
     lab_by_id = {l["claim_id"]: l for l in labels}
     flagged = sum(1 for f in feats if f["n_findings"] > 0)
