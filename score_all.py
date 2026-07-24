@@ -9,12 +9,12 @@ numbers; only the prose is deferred.
 
 Everything else (score, money, action, evidence) is computed here in full.
 """
-import shutil
 from pathlib import Path
 
 import pyarrow as pa
 from deltalake import write_deltalake, DeltaTable
 
+import config.storage as stg
 from config.spark_config import load_config
 from batch.mine_baselines import mine_all
 from batch.patient_history import build_patient_history
@@ -43,14 +43,15 @@ class _NoLLM(LLMClient):
 
 
 def _write(path: str, rows: list[dict]):
-    shutil.rmtree(path, ignore_errors=True)
+    """No rmtree — Delta's own overwrite works on any backend."""
     if not rows:
         return
     t = pa.Table.from_pylist(rows)
     for i, f in enumerate(t.schema):
         if pa.types.is_null(f.type):
             t = t.set_column(i, f.name, t.column(i).cast(pa.string()))
-    write_deltalake(path, t, mode="overwrite")
+    write_deltalake(path, t, mode="overwrite",
+                    storage_options=stg.deltalake_storage_options() or None)
 
 
 def build_context(rows: list[dict]) -> dict:
@@ -127,10 +128,13 @@ def score_all(rows: list[dict], ctx: dict, explainer=None, detector=None) -> lis
 
 def main():
     cfg = load_config()
-    ref = cfg["paths"]["reference"]
+    so = stg.deltalake_storage_options() or None
+    corpus_path = cfg["paths"]["corpus"] if stg.backend() == "local" \
+        else stg.table_path("corpus")
 
     print("1) loading corpus ...")
-    rows = DeltaTable(cfg["paths"]["corpus"]).to_pyarrow_table().to_pylist()
+    rows = DeltaTable(corpus_path,
+                      storage_options=so).to_pyarrow_table().to_pylist()
     print(f"   {len(rows)} lines, {len({r['claim_id'] for r in rows})} claims")
 
     print("2) building shared evidence layers ...")
@@ -153,7 +157,7 @@ def main():
 
     print("4) scoring every claim ...")
     verdicts = score_all(rows, ctx, explainer, detector)
-    _write(f"{ref}/verdicts", verdicts)
+    _write(stg.table_path("verdicts"), verdicts)
 
     flagged = [v for v in verdicts if v["recommended_action"] != "AUTO_APPROVE"]
     money = sum(v["estimated_excess_inr"] for v in flagged)
