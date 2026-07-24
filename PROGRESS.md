@@ -1,6 +1,8 @@
 # MediGuard AI — Progress So Far
 
-_A plain-words record of where the project stands, so we can pick up cleanly later._
+_A plain-words record of where the project stands, so I can pick up cleanly later._
+
+_Last updated: 24 July 2026. Working alone from here on._
 
 ## What the project is, in one line
 A system that reads hospital bills, checks them for fraud and overcharging, and
@@ -9,7 +11,7 @@ platform first, with machine learning and AI added on top.
 
 ---
 
-## The big picture: how the whole system will work
+## The big picture: how the whole system works
 Think of an assembly line for a hospital bill:
 
 1. A messy bill comes in →
@@ -19,125 +21,153 @@ Think of an assembly line for a hospital bill:
 5. An AI writes a plain-language explanation with evidence →
 6. A human sees it all on a dashboard and decides.
 
-We are building this line one station at a time. Each station is finished, tested,
-and saved to GitHub before moving to the next.
+Every station is now built. What remains is running it on cloud.
 
 ---
 
-## What is DONE (Steps 1–5)
+## What is DONE
 
-**Step 1 — The foundation (contracts).**
-We agreed on the exact "shape" of the data before building anything: what a bill line
-looks like (27 fields), the shape of the 9 storage tables, and the shape of the final
-verdict. A test proves all these shapes agree. This is the ground everything stands on.
+**Step 1 — Contracts.** The exact shape of the data was frozen before any logic was
+written: 27 fields per bill line, 9 storage tables, one verdict shape. A test proves
+they all agree.
 
-**Step 2 — The walking skeleton.**
-We built a tiny version of the *whole* line and pushed fake bills through it end to
-end — in one side, out the other as a verdict. No real fraud logic yet; the point was
-to prove every station connects to the next before filling them in.
+**Step 2 — Walking skeleton.** A stub version of the whole line, with fake bills going
+in one end and verdicts coming out the other. Proved the stations connect before
+filling them in.
 
-**Step 3 — The ingestion gate (the front door).**
-The first real component. It takes messy hospital bills and turns each one into a
-clean, standard row. It renames each hospital's columns to our standard, removes
-patient names and scrambles patient IDs (privacy), translates foreign medical codes
-into Indian ones (SNOMED→ICD-10, CPT→PM-JAY HBP codes) and attaches the official
-government rupee rate, checks every row against the rulebook, and sends bad rows to a
-"quarantine" pile with a reason. Messy in, clean and private out.
+**Step 3 — Ingestion gate.** Turns messy hospital bills into clean standard rows.
+Renames columns, removes patient names and hashes patient IDs, translates foreign
+codes to Indian ones (SNOMED→ICD-10, CPT→PM-JAY HBP) and attaches the official rate,
+validates every row, and quarantines bad rows with a reason.
 
-**Step 4 — The rules & baseline engine (first fraud detection).**
-The first component that actually looks for fraud. It first learns what "normal" looks
-like from all the bills (which treatments go with which illnesses, and typical price
-ranges), then runs four checks on every bill: charged above the official rate,
-treatment doesn't match the illness, more days billed than the patient stayed, and
-price far above the population norm. Every finding comes with a plain reason and an
-exact rupee figure.
+**Step 4 — Rules and baselines.** Learns what normal looks like from the corpus, then
+runs four checks: charged above the official rate, treatment doesn't match the
+illness, more days billed than the patient stayed, price far above normal. Each
+finding has a plain reason and a rupee figure.
 
-**Step 5 — The cost model (smarter money check).**
-The last of the hand-built checks. Instead of only "did they break the fixed rate," it
-estimates a fair price range for each line and flags bills sitting far above it — even
-when they stay under the official cap. This catches inflated bills the hard rules would
-miss.
+**Step 5 — Cost model.** Estimates a fair price range per line and flags bills far
+above it even when they stay under the official cap.
 
-**State right now:** everything runs on your Windows laptop, no cloud needed yet.
-**29 automated tests pass.** Every step is a clean commit in GitHub.
+**Step 6 — Feature engineering.** Turns all the signals above into one row of numbers
+per claim, in a fixed order, ready for the model.
+
+**Step 7 — Machine learning.** A LightGBM model gives one fraud score per claim. SHAP
+explains which features drove each score. The model beats the rules-only baseline —
+this is the number that justifies building it.
+
+**Step 8 — Anomaly detection.** Flags strange bills that break no specific rule.
+Catches unbundling, which the four rules structurally cannot see.
+
+**Step 9 — Provider fraud-ring graph.** Builds a network of hospitals linked by shared
+patients and finds tight clusters. Uses networkx. The generator plants a real ring of
+3 hospitals shuttling 45 patients, and records who is in it, so the graph can be
+scored honestly.
+
+**Step 10 — Patient history checks.** Repeated expensive tests, rapid readmissions,
+duplicate service dates, patients shuttled between providers.
+
+**Step 11 — Streaming layer.** Redpanda in Docker, windowed counters for sudden spikes
+in a hospital's billing.
+
+**Step 12 — The two agents.** Reader pulls facts from the discharge note. Reasoner
+writes the final explanation with citations. Both run on local Ollama. A numeric guard
+throws away any output where the model invented a number that was not in the evidence.
+
+**Step 13 — Dashboard.** The screen a reviewer uses: verdict, evidence, money at
+stake, accept/reject/escalate.
+
+**Step 14 — Spark batch layer.** Runs in Docker. Tested to produce the same results as
+the plain Python versions.
+
+**Step 15 — Storage abstraction.** `config/storage.py` supports three backends —
+local folders, Azurite (Azure's emulator, runs on the laptop), and real ADLS Gen2.
+Switching is one line in `config.yaml`. Credentials come from environment variables
+only.
+
+**State right now:** runs on the Windows laptop. **133 tests**, all passing when the
+Spark tests are skipped. Pushed to a private GitHub repo.
 
 ---
 
 ## What is REMAINING
 
-**Feature engineering (next step).**
-Turn all the signals from the checks above into one tidy row of numbers per claim —
-the format machine learning needs.
+**1. Make the scripts use the storage switch.**
+Only `run_spark_batch.py` currently calls `table_path()`. The other seventeen scripts
+still read `cfg["paths"]` directly, so they write to the laptop no matter what
+`storage.backend` says. Each one needs changing. Start with `rebuild_data.py`.
 
-**Machine learning model.**
-Train a model that combines all the signals into a single fraud score, plus a tool
-(SHAP) that explains which signals drove each score.
+**2. Remove `shutil.rmtree` from `rebuild_data.py`.**
+It deletes a local folder, which will not work against Azure. Delta's own
+`mode="overwrite"` already does the job and keeps version history.
 
-**Anomaly detection.**
-A method that flags unusual bills even when they break no specific rule.
+**3. Test on Azurite.**
+Set `storage.backend: azurite`, start Docker, create the container, run the pipeline.
+Free, offline, and uses the real Azure Storage API — so it proves the cloud code path
+before spending anything.
 
-**The "reader" AI (semantic matching).**
-Matches the doctor's discharge summary against the billed items to spot charges with no
-medical justification in the notes.
+**4. Run on real Azure.**
+Storage account with hierarchical namespace enabled, container named `mediguard`,
+export `AZURE_STORAGE_ACCOUNT` and `AZURE_STORAGE_KEY`, set
+`storage.backend: adls`. Set a budget alert first. Full instructions in
+`INFRASTRUCTURE.md`.
 
-**Provider fraud-ring graph.**
-Builds a network of hospitals and shared patients to spot coordinated fraud rings.
-(This is the genuine "big data" step that will run on Spark, on Google Colab, writing
-to your S3 bucket.)
+**5. Run the Spark tests in Docker.**
+`tests/test_spark_jobs.py` hangs on Windows because Spark needs Java and Linux. It
+must run inside the container:
+`docker compose exec spark python -m pytest tests/test_spark_jobs.py -v`
 
-**Patient history checks.**
-Spot things like the same expensive test billed repeatedly across visits.
-
-**The live/streaming layer.**
-Process bills in real time as they arrive (Redpanda locally, Kafka on cloud), catching
-sudden spikes in a hospital's billing.
-
-**The two AI agents (with local Ollama).**
-The Reader (pulls facts from documents) and the Reasoner (writes the final
-explanation with citations). Runs locally on your machine, private, no API keys.
-
-**The serving layer + dashboard.**
-The screen a human reviewer actually uses: the verdict, the evidence, the money at
-stake, and accept/reject buttons.
-
-**Real data at scale + cloud run.**
-Generate the full synthetic corpus and run the heavy batch jobs on Colab + S3.
-
-**Final evaluation.**
-Measure how well the system catches fraud and write up the results.
+**6. Scale up and evaluate.**
+Generate a larger corpus, run the batch jobs on cloud, record the results, then tear
+the cloud resources down.
 
 ---
 
 ## How much is done?
 
-**Roughly 25–30% of the full project.**
+**Roughly 80%.**
 
-Why that number, honestly:
-- What's done is the **foundation and the entire hand-built fraud-checking layer** —
-  the hardest part to get *right*, and the part everything else depends on. Getting
-  this solid removes most of the risk from the rest.
-- But by sheer volume, a lot remains: machine learning, the AI agents, the streaming
-  layer, the fraud-ring graph, the dashboard, and running it all at scale in the cloud.
+Every component is built and tested. What remains is plumbing the storage switch
+through the remaining scripts, and proving the whole thing runs on real Azure. That is
+real work, but it is not new components.
 
-So: **the skeleton and the muscle of the "rules" half are complete; the "learning" and
-"AI" halves, the live layer, and the cloud/scale work are still ahead.** The early
-foundation counts for more than its raw percentage suggests, because it makes each
-remaining step faster and safer to build.
+The honest caveat for the write-up: all results are on synthetic data. The numbers show
+the pipeline works and each component does its job. They are not production accuracy
+figures and should not be presented as such.
 
 ---
 
-## Key decisions locked in (so we don't re-litigate them later)
+## Key decisions locked in
 - **Python 3.12** (not 3.14 — too new for these tools).
-- **Local development uses delta-rs**; real Spark big-data jobs run on **Google Colab**,
-  writing to an **AWS S3 bucket** (EC2 dropped to stay near-free; region Mumbai).
-- **LLM is local Ollama** (`qwen2.5:3b`, sized for your 4GB GPU) with an optional
-  cloud fallback switch. No Groq.
-- **GitHub: one commit per step.**
-- Secrets (patient salt, any API/AWS keys) live in environment variables, never in the
-  repo.
+- **Cloud is Azure**, not AWS. Storage = ADLS Gen2, compute = Databricks, broker =
+  Event Hubs. Earlier notes mentioning Colab and S3 are out of date; ignore them.
+- **Azurite is tested before real Azure.** It speaks the real Azure API and costs
+  nothing.
+- **LLM is local Ollama** (`qwen2.5:3b`, sized for a 4GB GPU) with an optional cloud
+  fallback switch, off by default. No API keys needed.
+- **Spark runs in Docker**, not natively on Windows. Windows Spark breaks on
+  winutils and JVM mismatches.
+- **The graph uses networkx**, not Spark. Fine at this corpus size.
+- **GitHub: private repo, one commit per step.**
+- Secrets (patient salt, Azure keys) live in environment variables, never in the repo.
+  `.gitignore` covers `.venv`, `/data`, `.env`, `__pycache__`.
+
+---
+
+## Cost discipline (Azure)
+- Storage is nearly free. Databricks and Event Hubs are not.
+- Set the Databricks cluster to auto-terminate after 15–20 minutes idle.
+- Delete the Event Hubs namespace when finished.
+- Set a budget alert in Cost Management before creating anything.
+- Activate the $200 credit only when ready to run and record — it expires 30 days
+  after activation whether used or not.
+
+---
 
 ## How to resume
-1. Open `C:\mediguard-ai`, run `source .venv/Scripts/activate`.
-2. Check health: `python -m pytest tests/ -v` → expect **29 passed**.
-3. Next step to build: **feature engineering** (turn the check signals into a numeric
-   row per claim for the ML model).
+1. Open `D:\bigdata\mediguard-ai`, run `source .venv/Scripts/activate`.
+2. Check health: `python -m pytest tests/ -v --ignore=tests/test_spark_jobs.py`
+   → expect **128 passed**. The `--ignore` is required; the Spark tests hang on
+   Windows.
+3. If the ML tests skip, run `python rebuild_data.py` then `python run_ml.py`.
+4. Next step to build: make `rebuild_data.py` use `table_path()` from
+   `config/storage.py`.
