@@ -4,8 +4,10 @@ The dashboard file is all layout; the decisions about WHICH claims a reviewer se
 in what order, and how their verdict is recorded live here where a test can reach
 them. UI code that hides business logic is untestable, and this is the part that
 actually matters.
+
+Storage options are passed in rather than looked up, so the same functions work
+against local folders, Azurite, or ADLS — and tests can still use temp folders.
 """
-import shutil
 from datetime import datetime
 
 import pyarrow as pa
@@ -19,24 +21,26 @@ SORT_FIELDS = {
 VALID_DECISIONS = {"accepted", "rejected", "escalated"}
 
 
-def load_table(path: str) -> list[dict]:
+def load_table(path: str, storage_options=None) -> list[dict]:
     try:
-        return DeltaTable(path).to_pyarrow_table().to_pylist()
+        return DeltaTable(path,
+                          storage_options=storage_options).to_pyarrow_table().to_pylist()
     except Exception:
         return []
 
 
-def load_decisions(path: str) -> dict:
-    return {r["claim_id"]: r for r in load_table(path)}
+def load_decisions(path: str, storage_options=None) -> dict:
+    return {r["claim_id"]: r for r in load_table(path, storage_options)}
 
 
 def save_decision(path: str, claim_id: str, decision: str,
-                  reviewer: str = "", note: str = "") -> dict:
+                  reviewer: str = "", note: str = "",
+                  storage_options=None) -> dict:
     """Record a reviewer's decision. Re-deciding a claim replaces the old record."""
     if decision not in VALID_DECISIONS:
         raise ValueError(f"invalid decision {decision!r}")
 
-    existing = load_decisions(path)
+    existing = load_decisions(path, storage_options)
     existing[claim_id] = {
         "claim_id": claim_id,
         "adjudicator_decision": decision,
@@ -44,9 +48,8 @@ def save_decision(path: str, claim_id: str, decision: str,
         "decided_ts": datetime.now().isoformat(timespec="seconds"),
         "note": note or "",
     }
-    shutil.rmtree(path, ignore_errors=True)
     write_deltalake(path, pa.Table.from_pylist(list(existing.values())),
-                    mode="overwrite")
+                    mode="overwrite", storage_options=storage_options)
     return existing[claim_id]
 
 

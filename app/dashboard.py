@@ -3,14 +3,13 @@
 Run:  streamlit run app/dashboard.py
 
 WHO WRITES WHAT (the single-writer rule from Step 1 still holds):
-  score_all.py  writes  reference/verdicts     - the scored claims
-  this app      writes  reference/decisions    - the human's accept/reject
+  score_all.py  writes  verdicts     - the scored claims
+  this app      writes  decisions    - the human's accept/reject
 
 They are separate tables joined on claim_id, so re-scoring never destroys a reviewer's
 work and a reviewer never overwrites a score.
 """
 import json
-import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -22,7 +21,7 @@ import pyarrow as pa
 import streamlit as st
 from deltalake import DeltaTable, write_deltalake
 
-from config.spark_config import load_config
+import config.storage as stg
 from app.review_logic import (
     load_decisions as _load_decisions, save_decision as _save_decision,
     build_queue, queue_summary,
@@ -30,28 +29,29 @@ from app.review_logic import (
 
 st.set_page_config(page_title="MediGuard AI — Claim Review", layout="wide")
 
-CFG = load_config()
-REF = CFG["paths"]["reference"]
-VERDICTS = f"{REF}/verdicts"
-DECISIONS = f"{REF}/decisions"
+SO = stg.deltalake_storage_options() or None
+VERDICTS = stg.table_path("verdicts")
+DECISIONS = stg.table_path("decisions")
 
 
 # ---------------------------------------------------------------- data access
 @st.cache_data(show_spinner=False)
 def load_verdicts() -> pd.DataFrame:
     try:
-        rows = DeltaTable(VERDICTS).to_pyarrow_table().to_pylist()
+        rows = DeltaTable(VERDICTS,
+                          storage_options=SO).to_pyarrow_table().to_pylist()
     except Exception:
         return pd.DataFrame()
     return pd.DataFrame(rows)
 
 
 def load_decisions() -> dict:
-    return _load_decisions(DECISIONS)
+    return _load_decisions(DECISIONS, SO)
 
 
 def save_decision(claim_id: str, decision: str, reviewer: str, note: str):
-    _save_decision(DECISIONS, claim_id, decision, reviewer, note)
+    _save_decision(DECISIONS, claim_id, decision, reviewer, note,
+                   storage_options=SO)
 
 
 def money(x) -> str:
@@ -64,6 +64,7 @@ def money(x) -> str:
 # ---------------------------------------------------------------- sidebar
 st.sidebar.title("MediGuard AI")
 st.sidebar.caption("Explainable claim fraud review")
+st.sidebar.caption(f"Storage: {stg.describe()}")
 
 df = load_verdicts()
 if df.empty:
