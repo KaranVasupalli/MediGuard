@@ -45,7 +45,7 @@ def table_path(name: str) -> str:
         return f"{cfg['paths']['reference']}/{name}"
 
     if b == "azurite":
-        return f"wasbs://{container()}@{AZURITE_ACCOUNT}.blob.core.windows.net/{name}"
+        return f"az://{container()}/{name}"
 
     if b == "adls":
         account = os.environ.get("AZURE_STORAGE_ACCOUNT", "")
@@ -96,9 +96,11 @@ def deltalake_storage_options() -> dict:
     """Equivalent options for the delta-rs (non-Spark) writer used locally."""
     b = backend()
     if b == "azurite":
-        return {"AZURE_STORAGE_ACCOUNT_NAME": AZURITE_ACCOUNT,
-                "AZURE_STORAGE_ACCOUNT_KEY": AZURITE_KEY,
-                "AZURE_STORAGE_USE_EMULATOR": "true"}
+        host = os.environ.get("AZURITE_HOST", "127.0.0.1")
+        return {"account_name": AZURITE_ACCOUNT,
+            "access_key": AZURITE_KEY,
+            "endpoint": f"http://{host}:10000/{AZURITE_ACCOUNT}",
+            "allow_http": "true"}
     if b == "adls":
         return {"AZURE_STORAGE_ACCOUNT_NAME": os.environ.get("AZURE_STORAGE_ACCOUNT", ""),
                 "AZURE_STORAGE_ACCOUNT_KEY": os.environ.get("AZURE_STORAGE_KEY", "")}
