@@ -7,6 +7,7 @@ reports honestly if the answer is no.
 """
 import numpy as np
 import pandas as pd
+import config.storage as stg
 from deltalake import DeltaTable
 
 from config.spark_config import load_config
@@ -18,12 +19,16 @@ from ml.anomaly import AnomalyDetector, build_profile, to_frame, PROFILE_FEATURE
 
 def main():
     cfg = load_config()
-    ref = cfg["paths"]["reference"]
+    so = stg.deltalake_storage_options() or None
+    corpus_path = cfg["paths"]["corpus"] if stg.backend() == "local" \
+        else stg.table_path("corpus")
 
     print("1) loading corpus + labels ...")
-    rows = DeltaTable(cfg["paths"]["corpus"]).to_pyarrow_table().to_pylist()
+    rows = DeltaTable(corpus_path,
+                      storage_options=so).to_pyarrow_table().to_pylist()
     labels = {l["claim_id"]: l for l in
-              DeltaTable(f"{ref}/claim_labels").to_pyarrow_table().to_pylist()}
+              DeltaTable(stg.table_path("claim_labels"),
+                         storage_options=so).to_pyarrow_table().to_pylist()}
 
     by_claim: dict[str, list[dict]] = {}
     for r in rows:
