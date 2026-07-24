@@ -14,6 +14,7 @@ from pathlib import Path
 
 from deltalake import DeltaTable
 
+import config.storage as stg
 from config.spark_config import load_config
 from batch.mine_baselines import mine_all
 from batch.patient_history import build_patient_history
@@ -33,10 +34,13 @@ Length of stay 3 days. Discharged in stable condition on oral bronchodilators.""
 
 def main():
     cfg = load_config()
-    ref = cfg["paths"]["reference"]
+    so = stg.deltalake_storage_options() or None
+    corpus_path = cfg["paths"]["corpus"] if stg.backend() == "local" \
+        else stg.table_path("corpus")
 
     print("1) loading corpus + evidence layers ...")
-    rows = DeltaTable(cfg["paths"]["corpus"]).to_pyarrow_table().to_pylist()
+    rows = DeltaTable(corpus_path,
+                      storage_options=so).to_pyarrow_table().to_pylist()
     b = mine_all(rows)
     idx = build_indexes(b["diag_procedure_norms"], b["procedure_cost_pctiles"])
     cost_idx = {(r["hbp_code"], r["provider_state"]): r
