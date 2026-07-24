@@ -6,12 +6,12 @@ through exactly the same code path so the layer is demonstrable without Docker.
 Ends with the test that matters for a two-speed architecture: do the streaming and
 batch paths produce the SAME verdict for the same claim?
 """
-import shutil
 from pathlib import Path
 
 import pyarrow as pa
 from deltalake import write_deltalake, DeltaTable
 
+import config.storage as stg
 from config.spark_config import load_config
 from score_all import build_context, _NoLLM
 from streaming.producer import ClaimProducer, claims_from_corpus
@@ -23,22 +23,26 @@ from agents.reasoner import build_verdict
 
 
 def _write(path: str, rows: list[dict]):
-    shutil.rmtree(path, ignore_errors=True)
+    """No rmtree — Delta's own overwrite works on any backend."""
     if not rows:
         return
     t = pa.Table.from_pylist(rows)
     for i, f in enumerate(t.schema):
         if pa.types.is_null(f.type):
             t = t.set_column(i, f.name, t.column(i).cast(pa.string()))
-    write_deltalake(path, t, mode="overwrite")
+    write_deltalake(path, t, mode="overwrite",
+                    storage_options=stg.deltalake_storage_options() or None)
 
 
 def main(n_claims: int = 400):
     cfg = load_config()
-    ref = cfg["paths"]["reference"]
+    so = stg.deltalake_storage_options() or None
+    corpus_path = cfg["paths"]["corpus"] if stg.backend() == "local" \
+        else stg.table_path("corpus")
 
     print("1) loading corpus + evidence context ...")
-    rows = DeltaTable(cfg["paths"]["corpus"]).to_pyarrow_table().to_pylist()
+    rows = DeltaTable(corpus_path,
+                      storage_options=so).to_pyarrow_table().to_pylist()
     ctx = build_context(rows)
 
     # keep the demo quick: take the first N claims
@@ -76,7 +80,7 @@ def main(n_claims: int = 400):
     print(f"   windows open: {stats['windows']}  late events: {stats['late_events']}")
 
     snap = counters.snapshot()
-    _write(f"{ref}/streaming_counters", [
+    _write(stg.table_path("streaming_counters"), [
         {**s, "window_start": s["window_start"].isoformat(),
          "window_end": s["window_end"].isoformat()} for s in snap])
     print(f"   wrote {len(snap)} (provider, window) counter rows")
