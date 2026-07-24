@@ -4,7 +4,7 @@ Run AFTER rebuild_data.py, which produces realistic labelled claims.
 """
 from deltalake import DeltaTable
 
-from config.spark_config import load_config
+import config.storage as stg
 from ml.train import train
 from ml.explain import FraudExplainer
 
@@ -19,11 +19,12 @@ def main():
     print("EXPLAINING A PREDICTION (what a reviewer would actually see)")
     print("=" * 62)
 
-    cfg = load_config()
-    ref = cfg["paths"]["reference"]
-    feats = DeltaTable(f"{ref}/claim_features").to_pyarrow_table().to_pylist()
+    so = stg.deltalake_storage_options() or None
+    feats = DeltaTable(stg.table_path("claim_features"),
+                       storage_options=so).to_pyarrow_table().to_pylist()
     labels = {l["claim_id"]: l for l in
-              DeltaTable(f"{ref}/claim_labels").to_pyarrow_table().to_pylist()}
+              DeltaTable(stg.table_path("claim_labels"),
+                         storage_options=so).to_pyarrow_table().to_pylist()}
 
     ex = FraudExplainer()
 

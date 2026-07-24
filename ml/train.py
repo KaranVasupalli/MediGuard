@@ -14,6 +14,7 @@ Three things this script does that matter more than the training itself:
 import json
 from pathlib import Path
 
+import config.storage as stg
 import numpy as np
 import pandas as pd
 from deltalake import DeltaTable
@@ -31,11 +32,12 @@ MODEL_DIR = Path("./data/models")
 
 
 def load_training_data():
-    cfg = load_config()
-    ref = cfg["paths"]["reference"]
-    feats = DeltaTable(f"{ref}/claim_features").to_pyarrow_table().to_pylist()
+    so = stg.deltalake_storage_options() or None
+    feats = DeltaTable(stg.table_path("claim_features"),
+                       storage_options=so).to_pyarrow_table().to_pylist()
     labels = {l["claim_id"]: l["is_fraud"]
-              for l in DeltaTable(f"{ref}/claim_labels").to_pyarrow_table().to_pylist()}
+              for l in DeltaTable(stg.table_path("claim_labels"),
+                                  storage_options=so).to_pyarrow_table().to_pylist()}
 
     X, y, ids = [], [], []
     for row in feats:
