@@ -1,0 +1,63 @@
+environment: local
+
+paths:
+  data_root:   ./data
+  raw:         ./data/raw
+  corpus:      ./data/corpus/corpus
+  reference:   ./data/reference          # all mined/serving Delta tables live here
+  claims_demo: ./data/claims_demo
+  checkpoints: ./data/_checkpoints
+
+# Where tables live. Switch backend to move between local, the Azure emulator,
+# and real Azure — no application code changes.
+#   local   plain folders under ./data          (development)
+#   azurite Azure Storage API, Docker, offline  (proves the Azure path for free)
+#   adls    real Azure Data Lake Gen2           (cloud version; needs env credentials)
+storage:
+  backend: local            # local | azurite | adls
+  container: mediguard
+
+spark:
+  app_name: mediguard
+  master: "local[*]"
+  driver_memory: 8g
+  shuffle_partitions: 64
+  delta_extension: true
+
+streaming:
+  source: kafka                          # kafka | file | rate  (broker-optional switch)
+  kafka:
+    bootstrap_servers: "localhost:19092" # Redpanda default external listener
+    topic: claims
+  window:
+    tumbling: "1 hour"
+    sliding: "24 hours"
+    watermark: "2 hours"
+
+batch:
+  partition_by: [claim_year, claim_month]
+  zorder_by: provider_id
+  pagerank_iterations: 15
+  salt_buckets: 16                       # skew mitigation
+
+cost_model:                              # declared modelling assumptions
+  tier_multiplier: {Tier-1: 1.35, Tier-2: 1.0, Tier-3: 0.8}
+  lognormal_sigma: 0.25
+
+thresholds:
+  flag_fraud_score: 0.5
+  min_support_claims: 30                 # cold-start floor
+
+llm:
+  provider: ollama                       # ollama | openai_compatible
+  ollama:
+    base_url: "http://localhost:11434"
+    model: "qwen2.5:3b"                  # sized for a 4GB GPU
+    temperature: 0
+  fallback:
+    enabled: false                       # flip to true only when you want cloud
+    provider: openai_compatible
+    base_url: ""                         # e.g. https://api.example.com/v1
+    model: ""
+    api_key_env: "LLM_API_KEY"           # read from environment — never in this file
+  cache_dir: ./data/_llm_cache

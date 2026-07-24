@@ -1,0 +1,26 @@
+# Column mapping for one hospital's raw bill format -> canonical fields.
+# Each hospital that sends bills gets one of these. The canonical target is fixed;
+# only these mappings grow as new sources are onboarded.
+source_system: hospital_a
+
+# raw_column: canonical_field
+columns:
+  BILL_NO: claim_id
+  LN: line_no
+  PT_UID: _patient_raw_id        # underscore = consumed then dropped (never stored raw)
+  PT_NAME: _pii_drop             # explicitly dropped
+  HOSP_ID: provider_id
+  HOSP_NAME: provider_name
+  ST: provider_state
+  ADMIT: admission_date
+  DISCH: discharge_date
+  SVC_DT: service_date
+  DX_SNOMED: snomed_src          # foreign diagnosis code -> translated to icd10
+  PROC_CPT: cpt_code             # foreign procedure code -> translated to hbp
+  ITEM_DESC: line_desc
+  DEPT: department
+  QTY: quantity
+  RATE_INR: unit_price_inr
+  AMOUNT_INR: billed_inr
+
+date_format: "%Y-%m-%d"

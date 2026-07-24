@@ -1,0 +1,6 @@
+hbp_code,hbp_desc,package_rate_inr
+HBP-BED-001,General ward per day,2000
+HBP-ICU-002,Critical care ICU/day,4500
+HBP-LAB-014,Complete Blood Count,180
+HBP-MED-030,IV fluid therapy,280
+HBP-CON-005,Physician consult,900

@@ -1,0 +1,58 @@
+# Spark container for the MediGuard batch layer.
+#
+# Built from a plain Python base rather than a vendor image, because vendor Spark
+# images move or disappear (bitnami/spark tags went to a paid catalog in 2025).
+#
+# BASE IMAGE IS PINNED TO BOOKWORM ON PURPOSE.
+# Newer python:3.12-slim tags track Debian trixie, which dropped openjdk-17 in favour
+# of 21 — and Spark 3.5 supports Java 8/11/17, NOT 21.
+#
+# PIP INSTALLS ARE SPLIT ACROSS LAYERS ON PURPOSE.
+# A single pip command is one Docker layer: if the last package fails (a DNS blip, a
+# slow mirror), the whole download is discarded and repeats on the next attempt.
+# Split into layers, each success is cached, so a retry resumes where it stopped
+# instead of re-downloading ~400MB of PySpark.
+
+FROM python:3.12-slim-bookworm
+
+# Be patient with slow or flaky networks rather than failing after a few seconds.
+ENV PIP_DEFAULT_TIMEOUT=120 \
+    PIP_RETRIES=10 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PYTHONUNBUFFERED=1 \
+    HOME=/tmp
+
+# Java is required by Spark. default-jre-headless resolves to the distro's supported
+# JRE (Java 17 on bookworm) rather than a hardcoded version number.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        default-jre-headless \
+        procps \
+        curl && \
+    rm -rf /var/lib/apt/lists/*
+
+# Derive JAVA_HOME from the real java binary — the path differs on amd64 vs arm64.
+RUN JAVA_BIN="$(readlink -f "$(command -v java)")" && \
+    JAVA_HOME="$(dirname "$(dirname "$JAVA_BIN")")" && \
+    ln -sfn "$JAVA_HOME" /opt/java
+
+ENV JAVA_HOME=/opt/java \
+    PATH=/opt/java/bin:$PATH \
+    PYSPARK_PYTHON=python3 \
+    PYSPARK_DRIVER_PYTHON=python3
+
+# --- pip layers, largest first so the big download is cached earliest -------------
+RUN pip install --no-cache-dir pyspark==3.5.1
+RUN pip install --no-cache-dir delta-spark==3.2.0
+RUN pip install --no-cache-dir pandas pyarrow
+RUN pip install --no-cache-dir deltalake
+RUN pip install --no-cache-dir pyyaml pydantic pandera
+RUN pip install --no-cache-dir networkx scikit-learn lightgbm
+
+# Fail the BUILD, not a later job, if Java or Spark are not actually usable.
+RUN java -version && spark-submit --version
+
+WORKDIR /workspace
+
+# Keep the container alive so `docker compose exec spark ...` works.
+CMD ["tail", "-f", "/dev/null"]

@@ -1,0 +1,6 @@
+cpt_code,hbp_code,hbp_desc
+99231,HBP-CON-005,Physician consult
+99291,HBP-ICU-002,Critical care ICU/day
+85025,HBP-LAB-014,Complete Blood Count
+96360,HBP-MED-030,IV fluid therapy
+99221,HBP-BED-001,General ward per day

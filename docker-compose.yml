@@ -1,0 +1,68 @@
+# MediGuard local stack.
+#
+#   redpanda  - Kafka-compatible broker for the speed layer (LOCAL version)
+#   spark     - real Apache Spark for the batch layer, on Linux, so none of the
+#               Windows winutils/JVM problems exist
+#   azurite   - Microsoft's official Azure Storage emulator. Code talks the real
+#               Azure Storage API locally, so the switch to ADLS Gen2 in the cloud
+#               version is a connection-string change, not a rewrite.
+#
+# Start:   docker compose up -d
+# Stop:    docker compose down
+# Logs:    docker compose logs -f spark
+#
+# The CLOUD version replaces these with Event Hubs (Kafka endpoint), Azure Databricks
+# and ADLS Gen2. Application code is identical; only config/credentials differ.
+
+services:
+  redpanda:
+    image: redpandadata/redpanda:v24.2.7
+    container_name: mediguard-redpanda
+    command:
+      - redpanda start
+      - --overprovisioned
+      - --smp 1
+      - --memory 1G
+      - --reserve-memory 0M
+      - --node-id 0
+      - --check=false
+      - --kafka-addr PLAINTEXT://0.0.0.0:29092,OUTSIDE://0.0.0.0:19092
+      - --advertise-kafka-addr PLAINTEXT://redpanda:29092,OUTSIDE://localhost:19092
+    ports:
+      - "19092:19092"        # from the host
+
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:latest
+    container_name: mediguard-azurite
+    command: azurite --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0 --location /data
+    ports:
+      - "10000:10000"        # blob
+      - "10001:10001"        # queue
+      - "10002:10002"        # table
+    volumes:
+      - azurite-data:/data
+
+  spark:
+    # Built locally — vendor Spark images move or go paid (bitnami/spark tags were
+    # withdrawn in 2025), so we pin our own and it cannot break underneath us.
+    build:
+      context: .
+      dockerfile: Dockerfile.spark
+    image: mediguard/spark:3.5.1
+    container_name: mediguard-spark
+    environment:
+      - PYSPARK_PYTHON=python3
+      - PYSPARK_DRIVER_PYTHON=python3
+      - HOME=/tmp
+    ports:
+      - "4040:4040"          # Spark job UI (open this while a job runs)
+    volumes:
+      - ./:/workspace        # the project, so jobs run against live code
+      - spark-ivy:/tmp/.ivy2 # cache the Delta jars between runs
+    working_dir: /workspace
+    depends_on:
+      - azurite
+
+volumes:
+  azurite-data:
+  spark-ivy:
