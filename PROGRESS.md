@@ -21,7 +21,7 @@ Think of an assembly line for a hospital bill:
 5. An AI writes a plain-language explanation with evidence →
 6. A human sees it all on a dashboard and decides.
 
-Every station is now built. What remains is running it on cloud.
+Every station is built. The whole pipeline now runs against the Azure Storage API.
 
 ---
 
@@ -31,108 +31,129 @@ Every station is now built. What remains is running it on cloud.
 written: 27 fields per bill line, 9 storage tables, one verdict shape. A test proves
 they all agree.
 
-**Step 2 — Walking skeleton.** A stub version of the whole line, with fake bills going
-in one end and verdicts coming out the other. Proved the stations connect before
-filling them in.
+**Step 2 — Walking skeleton.** A stub version of the whole line, proving the stations
+connect before filling them in. (`orchestrate.py` — kept for history, not run any more.)
 
 **Step 3 — Ingestion gate.** Turns messy hospital bills into clean standard rows.
 Renames columns, removes patient names and hashes patient IDs, translates foreign
 codes to Indian ones (SNOMED→ICD-10, CPT→PM-JAY HBP) and attaches the official rate,
 validates every row, and quarantines bad rows with a reason.
 
-**Step 4 — Rules and baselines.** Learns what normal looks like from the corpus, then
-runs four checks: charged above the official rate, treatment doesn't match the
-illness, more days billed than the patient stayed, price far above normal. Each
-finding has a plain reason and a rupee figure.
+**Step 4 — Rules and baselines.** Four checks: charged above the official rate,
+treatment doesn't match the illness, more days billed than the patient stayed, price
+far above normal. Each finding has a plain reason and a rupee figure.
 
-**Step 5 — Cost model.** Estimates a fair price range per line and flags bills far
-above it even when they stay under the official cap.
+**Step 5 — Cost model.** Flags bills far above a fair price range even when they stay
+under the official cap.
 
-**Step 6 — Feature engineering.** Turns all the signals above into one row of numbers
-per claim, in a fixed order, ready for the model.
+**Step 6 — Feature engineering.** 21 features, one row per claim, fixed order.
 
-**Step 7 — Machine learning.** A LightGBM model gives one fraud score per claim. SHAP
-explains which features drove each score. The model beats the rules-only baseline —
-this is the number that justifies building it.
+**Step 7 — Machine learning.** LightGBM plus SHAP.
 
-**Step 8 — Anomaly detection.** Flags strange bills that break no specific rule.
-Catches unbundling, which the four rules structurally cannot see.
+**Step 8 — Anomaly detection.** Isolation Forest on claim shape.
 
-**Step 9 — Provider fraud-ring graph.** Builds a network of hospitals linked by shared
-patients and finds tight clusters. Uses networkx. The generator plants a real ring of
-3 hospitals shuttling 45 patients, and records who is in it, so the graph can be
-scored honestly.
+**Step 9 — Provider fraud-ring graph.** networkx; hospitals linked by shared patients.
 
 **Step 10 — Patient history checks.** Repeated expensive tests, rapid readmissions,
-duplicate service dates, patients shuttled between providers.
+duplicate service dates, provider shuttling.
 
-**Step 11 — Streaming layer.** Redpanda in Docker, windowed counters for sudden spikes
-in a hospital's billing.
+**Step 11 — Streaming layer.** Windowed counters and live alerts; falls back to
+replaying the corpus when no broker is running.
 
-**Step 12 — The two agents.** Reader pulls facts from the discharge note. Reasoner
-writes the final explanation with citations. Both run on local Ollama. A numeric guard
-throws away any output where the model invented a number that was not in the evidence.
+**Step 12 — The two agents.** Reader pulls facts from the discharge note, Reasoner
+writes the explanation with citations. Local Ollama. A numeric guard discards any
+output containing a number that was not in the evidence.
 
-**Step 13 — Dashboard.** The screen a reviewer uses: verdict, evidence, money at
-stake, accept/reject/escalate.
+**Step 13 — Dashboard.** Streamlit. Queue, verdict, line-by-line adjudication,
+evidence, audit trail, accept/reject/escalate.
 
-**Step 14 — Spark batch layer.** Runs in Docker. Tested to produce the same results as
-the plain Python versions.
+**Step 14 — Spark batch layer.** Runs in Docker, tested against the Python versions.
 
-**Step 15 — Storage abstraction.** `config/storage.py` supports three backends —
-local folders, Azurite (Azure's emulator, runs on the laptop), and real ADLS Gen2.
-Switching is one line in `config.yaml`. Credentials come from environment variables
-only.
+**Step 15 — Storage abstraction.** `config/storage.py` supports local, Azurite, and
+ADLS Gen2. One line in `config.yaml` switches between them.
 
-**State right now:** runs on the Windows laptop. **133 tests**, all passing when the
-Spark tests are skipped. Pushed to a private GitHub repo.
+**Step 16 — Every script wired to the storage switch.** Previously only
+`run_spark_batch.py` used it, so the rest silently wrote to the laptop whatever the
+config said. Now `rebuild_data.py`, `run_ml.py`, `ml/train.py`, `run_anomaly.py`,
+`run_graph.py`, `run_history.py`, `score_all.py`, `run_agents.py`, `run_features.py`,
+`run_rules.py`, `run_ingestion.py`, `run_cost_model.py`, `run_streaming.py`,
+`app/dashboard.py` and `app/review_logic.py` all resolve paths through
+`stg.table_path()` and pass `storage_options`.
+
+**Step 17 — Full pipeline verified on Azurite.** Every stage read and wrote through
+the real Azure Storage API, with identical results to the local run.
+
+**State right now:** 123 tests passing (Spark tests excluded — they need Docker).
+Private GitHub repo. `storage.backend` currently set to `azurite`.
+
+---
+
+## Results (synthetic data, 2000 claims, 11.5% fraud)
+
+**Model vs rules-only**, same test set of 600 claims:
+
+| | Rules only | Model |
+|---|---|---|
+| Precision | 0.67 | 1.00 |
+| Recall | 0.97 | 0.94 |
+| F1 | 0.79 | 0.97 |
+| PR-AUC | — | 0.976 |
+
+The model catches 65 of 69 fraud claims with **zero** false alarms; the rules flag far
+more honest claims to achieve similar recall.
+
+**Each layer catches what the others structurally cannot:**
+
+| Component | Held-out test | Rules catch | It catches |
+|---|---|---|---|
+| Anomaly detection | unbundling | 0/40 (0%) | 37/40 (92%) |
+| Patient history | cross-visit fraud | 0/105 (0%) | 75/105 (71%) |
+| Provider graph | planted ring of 3 | — | 3/3 |
+
+The graph never saw the answer. Ring providers scored 0.96–0.97 against 0.34 for the
+next highest; their internal sharing ratio was 0.60 vs 0.41 for honest providers.
+
+**Streaming vs batch:** 100% agreement across 400 claims. One logic, two speeds.
+
+**End to end:** 2000 verdicts, 230 flagged for review (11.5%), 1770 auto-approved,
+₹1,355,936 of excess identified.
 
 ---
 
 ## What is REMAINING
 
-**1. Make the scripts use the storage switch.**
-Only `run_spark_batch.py` currently calls `table_path()`. The other seventeen scripts
-still read `cfg["paths"]` directly, so they write to the laptop no matter what
-`storage.backend` says. Each one needs changing. Start with `rebuild_data.py`.
+**1. Run on real Azure (ADLS Gen2).**
+The only untested backend. Steps are in `INFRASTRUCTURE.md`. Storage account with
+hierarchical namespace enabled, container `mediguard`, export
+`AZURE_STORAGE_ACCOUNT` and `AZURE_STORAGE_KEY`, set `backend: adls`, run
+`rebuild_data.py`. Set a budget alert first.
 
-**2. Remove `shutil.rmtree` from `rebuild_data.py`.**
-It deletes a local folder, which will not work against Azure. Delta's own
-`mode="overwrite"` already does the job and keeps version history.
-
-**3. Test on Azurite.**
-Set `storage.backend: azurite`, start Docker, create the container, run the pipeline.
-Free, offline, and uses the real Azure Storage API — so it proves the cloud code path
-before spending anything.
-
-**4. Run on real Azure.**
-Storage account with hierarchical namespace enabled, container named `mediguard`,
-export `AZURE_STORAGE_ACCOUNT` and `AZURE_STORAGE_KEY`, set
-`storage.backend: adls`. Set a budget alert first. Full instructions in
-`INFRASTRUCTURE.md`.
-
-**5. Run the Spark tests in Docker.**
-`tests/test_spark_jobs.py` hangs on Windows because Spark needs Java and Linux. It
-must run inside the container:
+**2. Run the Spark tests in Docker.**
+`tests/test_spark_jobs.py` hangs on Windows because Spark needs Java and Linux:
 `docker compose exec spark python -m pytest tests/test_spark_jobs.py -v`
+The Spark image build previously failed on a DNS error inside Docker.
 
-**6. Scale up and evaluate.**
-Generate a larger corpus, run the batch jobs on cloud, record the results, then tear
-the cloud resources down.
+**3. Optional — Ollama.**
+Not installed, so the agents use the deterministic template and record
+`explanation source: offline` in the audit trail. Installing it and pulling
+`qwen2.5:3b` would produce more natural explanations. Not required.
+
+**4. Scale up and record.**
+Larger corpus, cloud run, screenshots, then tear the cloud resources down.
 
 ---
 
 ## How much is done?
 
-**Roughly 80%.**
+**Roughly 90%.** Every component is built, tested, and verified against the Azure
+Storage API. What remains is one cloud run and the write-up.
 
-Every component is built and tested. What remains is plumbing the storage switch
-through the remaining scripts, and proving the whole thing runs on real Azure. That is
-real work, but it is not new components.
-
-The honest caveat for the write-up: all results are on synthetic data. The numbers show
-the pipeline works and each component does its job. They are not production accuracy
-figures and should not be presented as such.
+The honest caveat for the report: all results are on synthetic data. They show the
+pipeline works and each component does its job. They are not production accuracy
+figures and must not be presented as such. The fraud taxonomy in
+`eval/generate_realistic.py` — upcoding, phantom service, impossible stay, quantity
+inflation, unbundling, repeat costly visits, plus a planted provider ring — is the
+ground truth, and should be described in the write-up.
 
 ---
 
@@ -141,15 +162,22 @@ figures and should not be presented as such.
 - **Cloud is Azure**, not AWS. Storage = ADLS Gen2, compute = Databricks, broker =
   Event Hubs. Earlier notes mentioning Colab and S3 are out of date; ignore them.
 - **Azurite is tested before real Azure.** It speaks the real Azure API and costs
-  nothing.
-- **LLM is local Ollama** (`qwen2.5:3b`, sized for a 4GB GPU) with an optional cloud
-  fallback switch, off by default. No API keys needed.
-- **Spark runs in Docker**, not natively on Windows. Windows Spark breaks on
-  winutils and JVM mismatches.
+  nothing. This already paid for itself: it caught a `wasbs://` scheme bug that
+  deltalake does not support, which would have failed in the cloud.
+- **Azurite paths use `az://`** for delta-rs, with `allow_http: true` because the
+  emulator serves plain HTTP. Spark still uses its own connector config.
+- **No `shutil.rmtree` anywhere.** Delta's `mode="overwrite"` works on every backend
+  and keeps version history; deleting a folder only works locally.
+- **LLM is local Ollama** (`qwen2.5:3b`, sized for a 4GB GPU), fallback off by
+  default. No API keys needed.
+- **Spark runs in Docker**, not natively on Windows.
 - **The graph uses networkx**, not Spark. Fine at this corpus size.
-- **GitHub: private repo, one commit per step.**
-- Secrets (patient salt, Azure keys) live in environment variables, never in the repo.
-  `.gitignore` covers `.venv`, `/data`, `.env`, `__pycache__`.
+- **Use Git Bash, not PowerShell.** The venv activation differs and PowerShell keeps
+  picking up the system Python 3.14.
+- **GitHub: private repo.**
+- Secrets live in environment variables, never in the repo. `.gitignore` covers
+  `.venv`, `/data`, `.env`, `__pycache__`. The Azurite key in `config/storage.py` is a
+  published Microsoft constant, not a secret.
 
 ---
 
@@ -164,10 +192,19 @@ figures and should not be presented as such.
 ---
 
 ## How to resume
-1. Open `D:\bigdata\mediguard-ai`, run `source .venv/Scripts/activate`.
-2. Check health: `python -m pytest tests/ -v --ignore=tests/test_spark_jobs.py`
-   → expect **128 passed**. The `--ignore` is required; the Spark tests hang on
+1. Open Git Bash at `D:\bigdata\mediguard-ai`, run `source .venv/Scripts/activate`.
+2. If using Azurite: `docker compose up -d azurite` and check `docker compose ps`.
+3. Check health: `python -m pytest tests/ -v --ignore=tests/test_spark_jobs.py`
+   → expect **123 passed**. The `--ignore` is required; the Spark tests hang on
    Windows.
-3. If the ML tests skip, run `python rebuild_data.py` then `python run_ml.py`.
-4. Next step to build: make `rebuild_data.py` use `table_path()` from
-   `config/storage.py`.
+4. Full run, in order:
+   ```
+   python rebuild_data.py
+   python run_ml.py
+   python run_anomaly.py
+   python run_graph.py
+   python run_history.py
+   python score_all.py
+   streamlit run app/dashboard.py
+   ```
+5. Next step: the real Azure (ADLS Gen2) run.
