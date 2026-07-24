@@ -4,32 +4,35 @@ Evaluation is against injected ground truth: a known set of ring providers exist
 the data, the graph never sees that list, and we measure whether it surfaces them at
 the top of the ring-risk ranking.
 """
-import shutil
-
 import pyarrow as pa
 from deltalake import write_deltalake, DeltaTable
 
+import config.storage as stg
 from config.spark_config import load_config
 from batch.provider_graph import build_provider_graph, analyse, ring_risk_score
 
 
 def write_delta(path: str, rows: list[dict]):
-    shutil.rmtree(path, ignore_errors=True)
+    """No rmtree — Delta's own overwrite works on any backend."""
     if not rows:
         return
     t = pa.Table.from_pylist(rows)
     for i, f in enumerate(t.schema):
         if pa.types.is_null(f.type):
             t = t.set_column(i, f.name, t.column(i).cast(pa.string()))
-    write_deltalake(path, t, mode="overwrite")
+    write_deltalake(path, t, mode="overwrite",
+                    storage_options=stg.deltalake_storage_options() or None)
 
 
 def main():
     cfg = load_config()
-    ref = cfg["paths"]["reference"]
+    so = stg.deltalake_storage_options() or None
+    corpus_path = cfg["paths"]["corpus"] if stg.backend() == "local" \
+        else stg.table_path("corpus")
 
     print("1) loading corpus ...")
-    rows = DeltaTable(cfg["paths"]["corpus"]).to_pyarrow_table().to_pylist()
+    rows = DeltaTable(corpus_path,
+                      storage_options=so).to_pyarrow_table().to_pylist()
     providers = {r["provider_id"] for r in rows}
     patients = {r["patient_hash"] for r in rows}
     print(f"   {len(rows)} lines | {len(providers)} providers | {len(patients)} patients")
@@ -49,7 +52,7 @@ def main():
     for s in stats:
         s["ring_risk"] = ring_risk_score(s, median_edges)
     stats.sort(key=lambda s: -s["ring_risk"])
-    write_delta(f"{ref}/provider_risk", stats)
+    write_delta(stg.table_path("provider_risk"), stats)
 
     print("\n   provider ranking by ring risk:")
     print(f"   {'provider':<10}{'ring_risk':>10}{'internal':>10}{'comm':>7}"
@@ -63,7 +66,8 @@ def main():
     # ---- honest evaluation against injected truth ----
     try:
         truth = {t["provider_id"]: t["in_ring"] for t in
-                 DeltaTable(f"{ref}/ring_truth").to_pyarrow_table().to_pylist()}
+                 DeltaTable(stg.table_path("ring_truth"),
+                            storage_options=so).to_pyarrow_table().to_pylist()}
     except Exception:
         print("\n   (no ring ground truth found — run rebuild_data.py first)")
         return
