@@ -4,27 +4,27 @@
                 ->  rules engine checks each claim  ->  explainable findings + rupee excess
 
 Runs the checks on a real corpus claim AND on a crafted suspicious claim so every
-rule visibly fires. On EC2 the mining runs in Spark; the rule logic is identical.
+rule visibly fires. The rule logic is identical wherever it runs.
 """
-import shutil
-
 import pyarrow as pa
 from deltalake import write_deltalake, DeltaTable
 
+import config.storage as stg
 from config.spark_config import load_config
 from batch.mine_baselines import mine_all
 from evidence.rules_baseline import build_indexes, evaluate_claim
 
 
 def _write_delta(path: str, rows: list[dict]):
-    shutil.rmtree(path, ignore_errors=True)
+    """No rmtree — Delta's own overwrite works on any backend."""
     if not rows:
         return
     table = pa.Table.from_pylist(rows)
     for i, f in enumerate(table.schema):
         if pa.types.is_null(f.type):
             table = table.set_column(i, f.name, table.column(i).cast(pa.string()))
-    write_deltalake(path, table, mode="overwrite")
+    write_deltalake(path, table, mode="overwrite",
+                    storage_options=stg.deltalake_storage_options() or None)
 
 
 def _crafted_suspicious_claim():
@@ -44,20 +44,23 @@ def _crafted_suspicious_claim():
 
 def main():
     cfg = load_config()
-    corpus_path = cfg["paths"]["corpus"]
-    ref = cfg["paths"]["reference"]
+    so = stg.deltalake_storage_options() or None
+    corpus_path = cfg["paths"]["corpus"] if stg.backend() == "local" \
+        else stg.table_path("corpus")
 
     print("1) reading clean corpus ...")
-    rows = DeltaTable(corpus_path).to_pyarrow_table().to_pylist()
+    rows = DeltaTable(corpus_path,
+                      storage_options=so).to_pyarrow_table().to_pylist()
     print(f"   {len(rows)} clean lines, {len({r['claim_id'] for r in rows})} claims")
 
     print("2) mining population baselines ...")
     baselines = mine_all(rows)
     norms, pctiles = baselines["diag_procedure_norms"], baselines["procedure_cost_pctiles"]
     print(f"   {len(norms)} (diagnosis,procedure) norms; {len(pctiles)} cost buckets")
-    _write_delta(f"{ref}/diag_procedure_norms", norms)
-    _write_delta(f"{ref}/procedure_cost_pctiles", pctiles)
-    print(f"   written to {ref}/diag_procedure_norms and /procedure_cost_pctiles")
+    _write_delta(stg.table_path("diag_procedure_norms"), norms)
+    _write_delta(stg.table_path("procedure_cost_pctiles"), pctiles)
+    print(f"   written to {stg.table_path('diag_procedure_norms')} "
+          f"and {stg.table_path('procedure_cost_pctiles')}")
 
     idx = build_indexes(norms, pctiles)
 
