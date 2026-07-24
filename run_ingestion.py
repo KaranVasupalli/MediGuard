@@ -4,14 +4,14 @@
                                           ->  quarantine pile (rejected rows)
 Then a stub verdict on one clean claim, to show the pipe still connects.
 
-On AWS/EC2 later the same gate output is written by Spark; the gate logic is identical.
+The gate logic is identical wherever it runs.
 """
-import shutil
 from pathlib import Path
 
 import pyarrow as pa
 from deltalake import write_deltalake, DeltaTable
 
+import config.storage as stg
 from config.spark_config import load_config
 from eval.generate_raw_source import generate_raw
 from data_quality.ingestion_gate import run_gate
@@ -21,18 +21,23 @@ MAPPING = str(Path(__file__).parent / "data_quality" / "mappings" / "source_hosp
 
 
 def _write_delta(path: str, rows: list[dict], partition_by=None):
-    shutil.rmtree(path, ignore_errors=True)
+    """No rmtree — Delta's own overwrite works on any backend."""
+    if not rows:
+        return
     table = pa.Table.from_pylist(rows)
     for i, field in enumerate(table.schema):        # Delta rejects all-null columns
         if pa.types.is_null(field.type):
             table = table.set_column(i, field.name, table.column(i).cast(pa.string()))
-    write_deltalake(path, table, mode="overwrite", partition_by=partition_by)
+    write_deltalake(path, table, mode="overwrite", partition_by=partition_by,
+                    storage_options=stg.deltalake_storage_options() or None)
 
 
 def main():
     cfg = load_config()
-    corpus_path = cfg["paths"]["corpus"]
-    quality_path = cfg["paths"]["reference"] + "/quality_report"
+    so = stg.deltalake_storage_options() or None
+    corpus_path = cfg["paths"]["corpus"] if stg.backend() == "local" \
+        else stg.table_path("corpus")
+    quality_path = stg.table_path("quality_report")
 
     print("1) generating messy RAW hospital bills ...")
     raw = generate_raw(n_claims=30)
@@ -60,11 +65,12 @@ def main():
         "clean_out": rep["clean_out"], "quarantined": rep["quarantined"],
         "clean_with_flags": rep["clean_with_flags"],
     }])
-    n = DeltaTable(corpus_path).to_pyarrow_table().num_rows
+    n = DeltaTable(corpus_path, storage_options=so).to_pyarrow_table().num_rows
     print(f"   corpus rows written: {n}")
 
     print("5) stub verdict on one clean claim ...")
-    rows = DeltaTable(corpus_path).to_pyarrow_table().to_pylist()
+    rows = DeltaTable(corpus_path,
+                      storage_options=so).to_pyarrow_table().to_pylist()
     sid = sorted({r["claim_id"] for r in rows})[0]
     lines = sorted([r for r in rows if r["claim_id"] == sid], key=lambda r: r["line_no"])
     v = make_verdict(sid, lines)
