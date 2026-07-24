@@ -6,11 +6,10 @@
 This is the table the ML model will train on. Nothing here invents a number: every
 feature is packed from evidence a deterministic computer already produced.
 """
-import shutil
-
 import pyarrow as pa
 from deltalake import write_deltalake, DeltaTable
 
+import config.storage as stg
 from config.spark_config import load_config
 from batch.mine_baselines import mine_all
 from evidence.rules_baseline import build_indexes, evaluate_claim
@@ -19,14 +18,15 @@ from ml.features import build_feature_row, FEATURE_NAMES, FEATURE_VERSION
 
 
 def _write_delta(path: str, rows: list[dict]):
-    shutil.rmtree(path, ignore_errors=True)
+    """No rmtree — Delta's own overwrite works on any backend."""
     if not rows:
         return
     table = pa.Table.from_pylist(rows)
     for i, f in enumerate(table.schema):
         if pa.types.is_null(f.type):
             table = table.set_column(i, f.name, table.column(i).cast(pa.string()))
-    write_deltalake(path, table, mode="overwrite")
+    write_deltalake(path, table, mode="overwrite",
+                    storage_options=stg.deltalake_storage_options() or None)
 
 
 def build_all_features(rows: list[dict], idx: dict, cost_idx: dict) -> list[dict]:
@@ -45,10 +45,14 @@ def build_all_features(rows: list[dict], idx: dict, cost_idx: dict) -> list[dict
 
 def main():
     cfg = load_config()
-    ref = cfg["paths"]["reference"]
+    so = stg.deltalake_storage_options() or None
+    corpus_path = cfg["paths"]["corpus"] if stg.backend() == "local" \
+        else stg.table_path("corpus")
+    features_path = stg.table_path("claim_features")
 
     print("1) reading clean corpus ...")
-    rows = DeltaTable(cfg["paths"]["corpus"]).to_pyarrow_table().to_pylist()
+    rows = DeltaTable(corpus_path,
+                      storage_options=so).to_pyarrow_table().to_pylist()
     print(f"   {len(rows)} lines, {len({r['claim_id'] for r in rows})} claims")
 
     print("2) mining baselines ...")
@@ -63,9 +67,10 @@ def main():
           f"(version {FEATURE_VERSION})")
 
     print("4) writing feature table to Delta ...")
-    _write_delta(f"{ref}/claim_features", feats)
-    n = DeltaTable(f"{ref}/claim_features").to_pyarrow_table().num_rows
-    print(f"   {n} rows written to {ref}/claim_features")
+    _write_delta(features_path, feats)
+    n = DeltaTable(features_path,
+                   storage_options=so).to_pyarrow_table().num_rows
+    print(f"   {n} rows written to {features_path}")
 
     print("\n5) sample — the most suspicious claim by excess ratio:")
     worst = max(feats, key=lambda f: f["excess_ratio"])
